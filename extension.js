@@ -65,12 +65,31 @@ export default class LauncherExtension extends Extension {
     const stripExt = this._settings.get_boolean("strip");
 
     this._getScripts(this._path).forEach((script) => {
+      const scriptName = script.get_name();
+      const baseName = scriptName.replace(/\.sh$/, "");
+      
+      // Check for matching icon files (.svg or .png)
+      let iconName = null;
+      const svgPath = Gio.File.new_for_path(`${this._path}/${baseName}.svg`);
+      const pngPath = Gio.File.new_for_path(`${this._path}/${baseName}.png`);
+      
+      if (svgPath.query_exists(null)) {
+        iconName = svgPath.get_path();
+      } else if (pngPath.query_exists(null)) {
+        iconName = pngPath.get_path();
+      }
+      
+      // Use custom icon if found, otherwise use shebang icon or default icon
+      const icon = iconName ? 
+        Gio.icon_new_for_string(iconName) : 
+        (shebangIcon ? script.get_icon() : Gio.ThemedIcon.new(dafaultIcon || BULLET));
+      
       this._menu.innerMenu.addAction(
         stripExt
-          ? script.get_name().replace(/\.[^\.]+$/, "")
-          : script.get_name(),
-        () => this._launchScript(script.get_name()),
-        shebangIcon ? script.get_icon() : dafaultIcon || BULLET,
+          ? scriptName.replace(/\.[^\.]+$/, "")
+          : scriptName,
+        () => this._launchScript(scriptName),
+        icon
       );
     });
   }
@@ -95,7 +114,9 @@ export default class LauncherExtension extends Extension {
       }
 
       const fileType = fileInfo.get_file_type();
-      if (fileType === Gio.FileType.REGULAR) {
+      const fileName = fileInfo.get_name();
+      // Only include .sh files
+      if (fileType === Gio.FileType.REGULAR && fileName.endsWith(".sh")) {
         scripts.push(fileInfo);
       }
     }
