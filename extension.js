@@ -41,6 +41,9 @@ export default class LauncherExtension extends Extension {
     this._fileMonitor = null;
     this._pathChangedId = null;
     this._refreshTimeout = null;
+    this._searchEntry = null;
+    this._searchMenuItem = null;
+    this._allScripts = [];
   }
 
   _appendLog(script, stdout, stderr) {
@@ -97,6 +100,7 @@ export default class LauncherExtension extends Extension {
 
   _fillMenu() {
     this._menu.innerMenu.removeAll();
+    this._allScripts = [];
 
     this._path = this._settings.get_string("path");
     if (!this._path) {
@@ -127,13 +131,35 @@ export default class LauncherExtension extends Extension {
         Gio.icon_new_for_string(iconName) :
         (shebangIcon ? script.get_icon() : Gio.ThemedIcon.new(dafaultIcon || BULLET));
 
-      this._menu.innerMenu.addAction(
-        stripExt
-          ? scriptName.replace(/\.[^\.]+$/, "")
-          : scriptName,
+      const displayName = stripExt
+        ? scriptName.replace(/\.[^\.]+$/, "")
+        : scriptName;
+
+      // Store script info for filtering
+      const scriptInfo = {
+        scriptName: scriptName,
+        displayName: displayName,
+        icon: icon,
+        menuItem: null
+      };
+
+      // Create menu item
+      scriptInfo.menuItem = this._menu.innerMenu.addAction(
+        displayName,
         () => this._launchScript(scriptName),
         icon
       );
+
+      this._allScripts.push(scriptInfo);
+    });
+  }
+
+  _filterMenu() {
+    const searchText = this._searchEntry.get_text().toLowerCase();
+
+    this._allScripts.forEach((scriptInfo) => {
+      const matches = scriptInfo.displayName.toLowerCase().includes(searchText);
+      scriptInfo.menuItem.visible = matches;
     });
   }
 
@@ -247,16 +273,58 @@ export default class LauncherExtension extends Extension {
     });
     this._indicator.add_child(icon);
 
+    // Create search entry with icon inside
+    this._searchEntry = new St.Entry({
+      style_class: 'popup-menu-item',
+      style: 'margin: 0px; padding: 4px 8px; min-width: 215px; border: 1px solid rgba(128, 128, 128, 0.3); border-radius: 4px;',
+      hint_text: 'Search scripts...',
+      track_hover: true,
+      can_focus: true,
+    });
+
+    // Create search icon inside the entry
+    const searchIcon = new St.Icon({
+      icon_name: 'edit-find-symbolic',
+      icon_size: 14,
+    });
+
+    // Set the icon as primary icon (left side) of the entry
+    this._searchEntry.set_primary_icon(searchIcon);
+
+    // Create search menu item with minimal padding
+    this._searchMenuItem = new PopupMenu.PopupBaseMenuItem({
+      reactive: false,
+      can_focus: false,
+      style_class: '',
+    });
+    this._searchMenuItem.actor.style = 'padding: 4px 12px; margin: 0px;';
+    this._searchMenuItem.add_child(this._searchEntry);
+
     this._menu = new ScrollableMenu();
+
+    // Add search box first, then the scrollable menu
+    this._indicator.menu.addMenuItem(this._searchMenuItem);
     this._indicator.menu.addMenuItem(this._menu);
 
     Main.panel.addToStatusArea(this.metadata.name, this._indicator);
+
+    // Connect search functionality
+    this._searchEntry.get_clutter_text().connect('text-changed', () => {
+      this._filterMenu();
+    });
 
     this._menuId = this._indicator.menu.connect(
       "open-state-changed",
       (open) => {
         if (open) {
           this._fillMenu();
+          // Clear search when menu opens
+          this._searchEntry.set_text('');
+          // Set focus to search entry
+          GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+            this._searchEntry.grab_key_focus();
+            return GLib.SOURCE_REMOVE;
+          });
         }
       },
     );
@@ -349,5 +417,8 @@ export default class LauncherExtension extends Extension {
     this._menu = null;
     this._settings = null;
     this._launcher = null;
+    this._searchEntry = null;
+    this._searchMenuItem = null;
+    this._allScripts = [];
   }
 }
