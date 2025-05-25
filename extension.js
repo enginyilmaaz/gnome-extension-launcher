@@ -7,7 +7,8 @@ import Gio from "gi://Gio";
 import GLib from "gi://GLib";
 import St from "gi://St";
 
-const ICON = "utilities-terminal-symbolic";
+// Default icon for the top panel
+const DEFAULT_ICON = "utilities-terminal-symbolic";
 const BULLET = "pan-end-symbolic";
 
 const ScrollableMenu = class ScrollableMenu extends PopupMenu.PopupMenuSection {
@@ -160,11 +161,46 @@ export default class LauncherExtension extends Extension {
     }
   }
 
+  // Helper function to get the icon based on settings
+  _getIcon() {
+    // Default to built-in terminal icon
+    let gicon = new Gio.ThemedIcon({ name: DEFAULT_ICON });
+    
+    // Only use custom icon if the settings are loaded and the feature is enabled
+    if (this._settings && this._settings.get_boolean("use-custom-top-icon")) {
+      try {
+        const iconName = this._settings.get_string("top-icon-name");
+        
+        if (iconName && iconName.trim() !== "") {
+          // Handle file paths vs icon names
+          if (iconName.startsWith('/') || iconName.endsWith('.svg') || iconName.endsWith('.png')) {
+            // It's a file path
+            const iconFile = Gio.File.new_for_path(iconName);
+            if (iconFile.query_exists(null)) {
+              gicon = Gio.icon_new_for_string(iconName);
+            }
+          } else {
+            // It's an icon name
+            gicon = new Gio.ThemedIcon({ name: iconName });
+          }
+        }
+      } catch (e) {
+        // If anything goes wrong, silently fall back to the default icon
+        // which is already set above
+      }
+    }
+    
+    return gicon;
+  }
+  
   _addIndicator() {
     this._indicator = new PanelMenu.Button(0.5, this.metadata.name, false);
-
+    
+    // Create icon using settings
+    let gicon = this._getIcon();
+    
     const icon = new St.Icon({
-      gicon: new Gio.ThemedIcon({ name: ICON }),
+      gicon: gicon,
       style_class: "system-status-icon",
     });
     this._indicator.add_child(icon);
@@ -190,17 +226,64 @@ export default class LauncherExtension extends Extension {
   }
 
   enable() {
-    this._addIndicator();
     this._settings = this.getSettings();
+    
+    // Set up settings change listeners for icon settings
+    this._iconSettingsChangedId1 = this._settings.connect('changed::use-custom-top-icon', () => {
+      this._updateTopIcon();
+    });
+    
+    this._iconSettingsChangedId2 = this._settings.connect('changed::top-icon-name', () => {
+      this._updateTopIcon();
+    });
+    
+    this._addIndicator();
     this._launcher = new Gio.SubprocessLauncher({
       flags: Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE,
     });
   }
+  
+  // Update the top panel icon based on current settings
+  _updateTopIcon() {
+    if (this._indicator) {
+      // Remove the old icon
+      let children = this._indicator.get_children();
+      if (children.length > 0) {
+        this._indicator.remove_child(children[0]);
+      }
+      
+      // Add the new icon
+      const icon = new St.Icon({
+        gicon: this._getIcon(),
+        style_class: "system-status-icon",
+      });
+      this._indicator.insert_child_at_index(icon, 0);
+    }
+  }
 
   disable() {
-    this._indicator.menu.disconnect(this._menuId);
-    this._indicator.destroy();
-    this._indicator = null;
+    // Disconnect settings listeners
+    if (this._settings) {
+      if (this._iconSettingsChangedId1) {
+        this._settings.disconnect(this._iconSettingsChangedId1);
+        this._iconSettingsChangedId1 = null;
+      }
+      if (this._iconSettingsChangedId2) {
+        this._settings.disconnect(this._iconSettingsChangedId2);
+        this._iconSettingsChangedId2 = null;
+      }
+    }
+    
+    // Disconnect menu
+    if (this._indicator && this._menuId) {
+      this._indicator.menu.disconnect(this._menuId);
+    }
+    
+    if (this._indicator) {
+      this._indicator.destroy();
+      this._indicator = null;
+    }
+    
     this._menuId = null;
     this._menu = null;
     this._settings = null;
