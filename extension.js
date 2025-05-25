@@ -38,6 +38,9 @@ export default class LauncherExtension extends Extension {
     this._launcher = null;
     this._menu = null;
     this._path = null;
+    this._fileMonitor = null;
+    this._pathChangedId = null;
+    this._refreshTimeout = null;
   }
 
   _appendLog(script, stdout, stderr) {
@@ -51,6 +54,45 @@ export default class LauncherExtension extends Extension {
     outputStream.write(encoder.encode(`STDOUT:\n${stdout}`), null);
     outputStream.write(encoder.encode(`STDERR:\n${stderr}`), null);
     outputStream.close(null);
+  }
+
+  _setupFileMonitor() {
+    // Clean up existing monitor
+    if (this._fileMonitor) {
+      this._fileMonitor.cancel();
+      this._fileMonitor = null;
+    }
+
+    const path = this._settings.get_string("path");
+    if (!path) {
+      return;
+    }
+
+    const directory = Gio.File.new_for_path(path);
+    if (!directory.query_exists(null)) {
+      return;
+    }
+
+    try {
+      this._fileMonitor = directory.monitor_directory(
+        Gio.FileMonitorFlags.NONE,
+        null
+      );
+
+      this._fileMonitor.connect('changed', () => {
+        // Debounce the refresh to avoid too many updates
+        if (this._refreshTimeout) {
+          GLib.source_remove(this._refreshTimeout);
+        }
+        this._refreshTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
+          this._fillMenu();
+          this._refreshTimeout = null;
+          return GLib.SOURCE_REMOVE;
+        });
+      });
+    } catch (e) {
+      // Silently fail if monitoring is not possible
+    }
   }
 
   _fillMenu() {
@@ -68,23 +110,23 @@ export default class LauncherExtension extends Extension {
     this._getScripts(this._path).forEach((script) => {
       const scriptName = script.get_name();
       const baseName = scriptName.replace(/\.sh$/, "");
-      
+
       // Check for matching icon files (.svg or .png)
       let iconName = null;
       const svgPath = Gio.File.new_for_path(`${this._path}/${baseName}.svg`);
       const pngPath = Gio.File.new_for_path(`${this._path}/${baseName}.png`);
-      
+
       if (svgPath.query_exists(null)) {
         iconName = svgPath.get_path();
       } else if (pngPath.query_exists(null)) {
         iconName = pngPath.get_path();
       }
-      
+
       // Use custom icon if found, otherwise use shebang icon or default icon
-      const icon = iconName ? 
-        Gio.icon_new_for_string(iconName) : 
+      const icon = iconName ?
+        Gio.icon_new_for_string(iconName) :
         (shebangIcon ? script.get_icon() : Gio.ThemedIcon.new(dafaultIcon || BULLET));
-      
+
       this._menu.innerMenu.addAction(
         stripExt
           ? scriptName.replace(/\.[^\.]+$/, "")
@@ -165,12 +207,12 @@ export default class LauncherExtension extends Extension {
   _getIcon() {
     // Default to built-in terminal icon
     let gicon = new Gio.ThemedIcon({ name: DEFAULT_ICON });
-    
+
     // Only use custom icon if the settings are loaded and the feature is enabled
     if (this._settings && this._settings.get_boolean("use-custom-top-icon")) {
       try {
         const iconName = this._settings.get_string("top-icon-name");
-        
+
         if (iconName && iconName.trim() !== "") {
           // Handle file paths vs icon names
           if (iconName.startsWith('/') || iconName.endsWith('.svg') || iconName.endsWith('.png')) {
@@ -189,16 +231,16 @@ export default class LauncherExtension extends Extension {
         // which is already set above
       }
     }
-    
+
     return gicon;
   }
-  
+
   _addIndicator() {
     this._indicator = new PanelMenu.Button(0.5, this.metadata.name, false);
-    
+
     // Create icon using settings
     let gicon = this._getIcon();
-    
+
     const icon = new St.Icon({
       gicon: gicon,
       style_class: "system-status-icon",
@@ -207,11 +249,6 @@ export default class LauncherExtension extends Extension {
 
     this._menu = new ScrollableMenu();
     this._indicator.menu.addMenuItem(this._menu);
-    this._indicator.menu.addAction(
-      "Settings",
-      () => this.openPreferences(),
-      "preferences-system-symbolic",
-    );
 
     Main.panel.addToStatusArea(this.metadata.name, this._indicator);
 
@@ -227,22 +264,30 @@ export default class LauncherExtension extends Extension {
 
   enable() {
     this._settings = this.getSettings();
-    
+
     // Set up settings change listeners for icon settings
     this._iconSettingsChangedId1 = this._settings.connect('changed::use-custom-top-icon', () => {
       this._updateTopIcon();
     });
-    
+
     this._iconSettingsChangedId2 = this._settings.connect('changed::top-icon-name', () => {
       this._updateTopIcon();
     });
-    
+
+    // Set up listener for path changes to update file monitor
+    this._pathChangedId = this._settings.connect('changed::path', () => {
+      this._setupFileMonitor();
+    });
+
     this._addIndicator();
     this._launcher = new Gio.SubprocessLauncher({
       flags: Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE,
     });
+
+    // Set up initial file monitoring
+    this._setupFileMonitor();
   }
-  
+
   // Update the top panel icon based on current settings
   _updateTopIcon() {
     if (this._indicator) {
@@ -251,7 +296,7 @@ export default class LauncherExtension extends Extension {
       if (children.length > 0) {
         this._indicator.remove_child(children[0]);
       }
-      
+
       // Add the new icon
       const icon = new St.Icon({
         gicon: this._getIcon(),
@@ -262,6 +307,18 @@ export default class LauncherExtension extends Extension {
   }
 
   disable() {
+    // Clean up refresh timeout
+    if (this._refreshTimeout) {
+      GLib.source_remove(this._refreshTimeout);
+      this._refreshTimeout = null;
+    }
+
+    // Clean up file monitor
+    if (this._fileMonitor) {
+      this._fileMonitor.cancel();
+      this._fileMonitor = null;
+    }
+
     // Disconnect settings listeners
     if (this._settings) {
       if (this._iconSettingsChangedId1) {
@@ -272,18 +329,22 @@ export default class LauncherExtension extends Extension {
         this._settings.disconnect(this._iconSettingsChangedId2);
         this._iconSettingsChangedId2 = null;
       }
+      if (this._pathChangedId) {
+        this._settings.disconnect(this._pathChangedId);
+        this._pathChangedId = null;
+      }
     }
-    
+
     // Disconnect menu
     if (this._indicator && this._menuId) {
       this._indicator.menu.disconnect(this._menuId);
     }
-    
+
     if (this._indicator) {
       this._indicator.destroy();
       this._indicator = null;
     }
-    
+
     this._menuId = null;
     this._menu = null;
     this._settings = null;
